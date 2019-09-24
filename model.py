@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import from_numpy_to_var
+from vpa.utils import from_numpy_to_var
 
 
 class FCN_mse(nn.Module):

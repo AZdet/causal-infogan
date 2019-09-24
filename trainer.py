@@ -7,6 +7,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
+from tqdm import tqdm
 
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
@@ -14,11 +15,13 @@ from torchvision.utils import save_image
 from tensorboard_logger import configure, log_value
 from collections import OrderedDict
 
-from planning import plan_traj_astar, discretize, undiscretize
-from dataset import ImagePairs
-from utils import plot_img, from_numpy_to_var, print_array, write_number_on_images, write_stats_from_var
-from model import get_causal_classifier
-from logger import Logger
+from vpa.planning import plan_traj_astar, discretize, undiscretize
+# from dataset import ImagePairs
+from vpa.gcp_datasets import h36m, maze, sawyer
+from vpa.utils import plot_img, from_numpy_to_var, print_array, write_number_on_images, write_stats_from_var
+from vpa.logger import Logger
+
+from vpa.eval import EvalPSNR
 
 
 class Trainer:
@@ -39,7 +42,7 @@ class Trainer:
         self.transw = kwargs['transw']
 
         # Training hyperparameters
-        self.batch_size = 100
+        self.batch_size = 16
         self.n_epochs = kwargs['n_epochs']
         self.c_dim = kwargs['cont_code_dim']
         self.rand_z_dim = kwargs['random_noise_dim']
@@ -54,6 +57,7 @@ class Trainer:
         self.planning_epoch = kwargs['planning_epoch']
         self.plan_length = kwargs['plan_length']
         self.discretization_bins = 20
+        self.n_closest_iters = kwargs['n_closest_iters']
 
         # Make directories
         self.data_dir = kwargs['data_dir']
@@ -72,6 +76,14 @@ class Trainer:
         self.test_num_codes = max(20, self.c_dim + 1)
         self.test_size = self.test_sample_size * self.test_num_codes
         self.eval_input = self._eval_noise()
+
+        if kwargs['dataset'] == 'h36m':
+            self.dataset = h36m.Dataset
+        elif kwargs['dataset'] == 'maze':
+            self.dataset = maze.Dataset
+        elif kwargs['dataset'] == 'sawyer':
+            self.dataset = sawyer.Dataset
+            
 
     def configure_logger(self):
         self.logger = Logger(os.path.join(self.out_dir, "log"))
@@ -145,11 +157,6 @@ class Trainer:
 
     def train(self):
         # Set up training.
-        real_o = Variable(torch.FloatTensor(self.batch_size, 3, 64, 64).cuda(), requires_grad=False)
-        real_o_next = Variable(torch.FloatTensor(self.batch_size, 3, 64, 64).cuda(), requires_grad=False)
-        label = Variable(torch.FloatTensor(self.batch_size).cuda(), requires_grad=False)
-        z = Variable(torch.FloatTensor(self.batch_size, self.rand_z_dim).cuda(), requires_grad=False)
-
         criterionD = nn.BCELoss().cuda()
 
         optimD = optim.Adam([{'params': self.D.parameters()}], lr=self.lr_d,
@@ -179,9 +186,8 @@ class Trainer:
 
         trans_comp = transforms.Compose(trans)
         # Image 1 and image 2 are k steps apart.
-        dataset = ImagePairs(root=rope_path,
-                             transform=trans_comp,
-                             n_frames_apart=self.k)
+        dataset = self.dataset(phase='train', mode='train')
+        self.plan_length = dataset.spec.max_seq_len - 3
         dataloader = torch.utils.data.DataLoader(dataset,
                                                  batch_size=self.batch_size,
                                                  shuffle=True,
@@ -190,27 +196,38 @@ class Trainer:
         ############################################
         # Load eval plan dataset
         planning_data_dir = self.planning_data_dir
-        dataset_start = dset.ImageFolder(root=os.path.join(planning_data_dir, 'start'),
-                                         transform=trans_comp)
-        dataset_goal = dset.ImageFolder(root=os.path.join(planning_data_dir, 'goal'),
-                                        transform=trans_comp)
-        data_start_loader = torch.utils.data.DataLoader(dataset_start,
+        dataset_plan = self.dataset(phase='val', mode='plan')
+        data_plan_loader = torch.utils.data.DataLoader(dataset_plan,
                                                         batch_size=1,
                                                         shuffle=False,
-                                                        num_workers=1,
+                                                        num_workers=4,
                                                         drop_last=True)
-        data_goal_loader = torch.utils.data.DataLoader(dataset_goal,
-                                                       batch_size=1,
-                                                       shuffle=False,
-                                                       num_workers=1,
-                                                       drop_last=True)
+        # dataset_start = self.dataset(phase='val', mode='start')
+        # dataset_goal = self.dataset(phase='val', mode='goal')
+        # data_start_loader = torch.utils.data.DataLoader(dataset_start,
+        #                                                 batch_size=1,
+        #                                                 shuffle=False,
+        #                                                 num_workers=1,
+        #                                                 drop_last=True)
+        # data_goal_loader = torch.utils.data.DataLoader(dataset_goal,
+        #                                                batch_size=1,
+        #                                                shuffle=False,
+        #                                                num_workers=1,
+        #                                                drop_last=True)
         ############################################
+        
+        real_o = Variable(torch.FloatTensor(self.batch_size, 3, dataset.img_sz, dataset.img_sz).cuda(), requires_grad=False)
+        real_o_next = Variable(torch.FloatTensor(self.batch_size, 3, dataset.img_sz, dataset.img_sz).cuda(), requires_grad=False)
+        label = Variable(torch.FloatTensor(self.batch_size).cuda(), requires_grad=False)
+        z = Variable(torch.FloatTensor(self.batch_size, self.rand_z_dim).cuda(), requires_grad=False)
+        
         for epoch in range(self.n_epochs + 1):
             self.G.train()
             self.D.train()
             self.Q.train()
             self.T.train()
-            for num_iters, batch_data in enumerate(dataloader, 0):
+            for num_iters, batch_data in tqdm(enumerate(dataloader, 0)):
+                # break
                 # Real data
                 o, _ = batch_data[0]
                 o_next, _ = batch_data[1]
@@ -222,6 +239,7 @@ class Trainer:
 
                 real_o.data.copy_(o)
                 real_o_next.data.copy_(o_next)
+                
                 if self.fcn:
                     real_o = self.apply_fcn_mse(o)
                     real_o_next = self.apply_fcn_mse(o_next)
@@ -405,6 +423,7 @@ class Trainer:
                     writer.writerow(["%.3f" % _tmp for _tmp in [epoch] + list(self.log_dict.values())])
             #############################################
             # Do planning?
+            
             if self.plan_length <= 0 or epoch not in self.planning_epoch:
                 continue
             print("\n#######################"
@@ -412,24 +431,42 @@ class Trainer:
             #############################################
             # Showing plans on real images using best code.
             # Min l2 distance from start and goal real images.
-            self.plan_hack(data_start_loader,
-                           data_goal_loader,
-                           epoch,
-                           'L2')
+            
+            evaluator = EvalPSNR(2)
+            
+            for i, data in enumerate(data_plan_loader):
+                plan = self.plan_hack(i, data[:, 0], data[:, -1], epoch, 'L2', data.shape[1] - 3)
+                evaluator(plan[None].cpu().numpy(), data.cpu().numpy())
+                print(evaluator.PSNR(), evaluator.SSIM())
 
-            # Min classifier distance from start and goal real images.
-            self.plan_hack(data_start_loader,
-                           data_goal_loader,
-                           epoch,
-                           'classifier')
+                self.make_gif(torch.cat([data[0], plan.cpu()], dim=2), i, epoch)
+
+
+            print(('Test: [{0}/{1}]\t'
+                   'PSNR {PSNR:.3f}'
+                   'SSIM {SSIM:.3f}'.format(
+                       i,
+                       len(data_plan_loader),
+                       PSNR=evaluator.PSNR(),
+                       SSIM=evaluator.SSIM())))
+                
+
+            # # Min classifier distance from start and goal real images.
+            # self.plan_hack(data_start_loader,
+            #                data_goal_loader,
+            #                epoch,
+            #                'classifier')
     #############################################
     # Visual Planning
     def plan_hack(self,
-                  data_start_loader,
-                  data_goal_loader,
+                  i,
+                  start_img,
+                  goal_img,
                   epoch,
                   metric,
-                  keep_best=10):
+                  length,
+                  save=True,  # TODO implement
+                  keep_best=1):
         """
         Generate visual plans from starts to goals.
         First, find the closest codes for starts and goals.
@@ -446,21 +483,20 @@ class Trainer:
         all_confidences = []
         c_start = None
         est_start_obs = None
-        for img in data_start_loader:
-            if self.fcn:
-                start_obs = self.apply_fcn_mse(img[0])
-            else:
-                start_obs = Variable(img[0]).cuda()
-            pt_start = os.path.join(self.out_dir, 'plans', 'c_min_start_%s.pt' % metric)
-            if os.path.exists(pt_start):
-                z_start, c_start, _, est_start_obs = torch.load(pt_start)
-            else:
-                z_start, c_start, _, est_start_obs = self.closest_code(start_obs,
-                                                                       400,
-                                                                       False,
-                                                                       metric, 1)
-                torch.save([z_start, c_start, _, est_start_obs], pt_start)
-            break
+        # for start_img in data_start_loader:
+        if self.fcn:
+            start_obs = self.apply_fcn_mse(start_img)
+        else:
+            start_obs = Variable(start_img).cuda()
+        pt_start = os.path.join(self.out_dir, 'plans', 'c_min_start_%s_%i.pt' % (metric, i))
+        if os.path.exists(pt_start) and save:
+            z_start, c_start, _, est_start_obs = torch.load(pt_start)
+        else:
+            z_start, c_start, _, est_start_obs = self.closest_code(start_obs,
+                                                                   400,
+                                                                   False,
+                                                                   metric, 1)
+            if save: torch.save([z_start, c_start, _, est_start_obs], pt_start)
         # Hacky for now
         try:
             c_start = Variable(c_start)
@@ -468,153 +504,163 @@ class Trainer:
         except RuntimeError:
             pass
 
-        for i, img in enumerate(data_goal_loader, 0):
-            if self.fcn:
-                goal_obs = self.apply_fcn_mse(img[0])
-            else:
-                goal_obs = Variable(img[0]).cuda()
-            pt_goal = os.path.join(self.out_dir, 'plans', 'c_min_goal_%s_%d_epoch_%d.pt' % (metric, i, epoch))
-            if os.path.exists(pt_goal):
-                z_goal, _, c_goal, est_goal_obs = torch.load(pt_goal)
-            else:
+        # for i, goal_img in enumerate(data_goal_loader, 0):
+        if self.fcn:
+            goal_obs = self.apply_fcn_mse(goal_img)
+        else:
+            goal_obs = Variable(goal_img).cuda()
+        pt_goal = os.path.join(self.out_dir, 'plans', 'c_min_goal_%s_%d_epoch_%d.pt' % (metric, i, epoch))
+        if os.path.exists(pt_goal) and save:
+            z_goal, _, c_goal, est_goal_obs = torch.load(pt_goal)
+        else:
 
-                z_goal, _, c_goal, est_goal_obs = self.closest_code(goal_obs,
-                                                                    400,
-                                                                    True,
-                                                                    metric, 1)
-                torch.save([z_goal, _, c_goal, est_goal_obs], pt_goal)
-            # Hacky for now
-            try:
-                c_goal = Variable(c_goal)
-                est_goal_obs = Variable(est_goal_obs)
-            except RuntimeError:
-                pass
-            # Plan using c_start and c_goal.
-            rollout = self.planner(c_start.repeat(self.traj_eval_copies, 1),
-                                   c_goal.repeat(self.traj_eval_copies, 1),
-                                   start_obs=start_obs,
-                                   goal_obs=goal_obs)
+            z_goal, _, c_goal, est_goal_obs = self.closest_code(goal_obs,
+                                                                400,
+                                                                True,
+                                                                metric, 1)
+            if save: torch.save([z_goal, _, c_goal, est_goal_obs], pt_goal)
+        # Hacky for now
+        try:
+            c_goal = Variable(c_goal)
+            est_goal_obs = Variable(est_goal_obs)
+        except RuntimeError:
+            pass
+        # Plan using c_start and c_goal.
+        rollout = self.planner(c_start.repeat(self.traj_eval_copies, 1),
+                               c_goal.repeat(self.traj_eval_copies, 1),
+                               length,
+                               start_obs=start_obs,
+                               goal_obs=goal_obs)
 
-            # Insert closest start and goal.
-            rollout.insert(0, est_start_obs.repeat(self.traj_eval_copies, 1, 1, 1))
-            rollout.append(est_goal_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+        # Insert real start and goal.
+        rollout.insert(0, est_start_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+        rollout.append(est_goal_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+        
+        rollout_best_k, confidences = self.get_best_k(rollout, 1)
+        rollout_data = torch.stack(rollout_best_k, dim=0)
 
-            # Insert real start and goal.
-            rollout.insert(0, start_obs.repeat(self.traj_eval_copies, 1, 1, 1))
-            rollout.append(goal_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+        masks = - np.ones([rollout_data.size()[0], keep_best, self.channel_dim] + list(start_img.shape[-2:]),
+                          dtype=np.float32)
+        # write_number_on_images(masks, confidences)
 
-            rollout_best_k, confidences = self.get_best_k(rollout, keep_best)
-            rollout_data = torch.stack(rollout_best_k, dim=0)
-
-            masks = - np.ones((rollout_data.size()[0], keep_best, self.channel_dim, 64, 64),
-                              dtype=np.float32)
-            write_number_on_images(masks, confidences)
-
-            # save_image(torch.max(rollout_data, from_numpy_to_var(masks)).view(-1, self.channel_dim, 64, 64).data,
-            #            os.path.join(self.out_dir, 'plans', '%s_min_%s_%d_epoch_%d.png'
-            #                         % (self.planner.__name__, metric, i, epoch)),
-            #            nrow=keep_best,
-            #            normalize=True)
-            pd = torch.max(rollout_data, from_numpy_to_var(masks)).permute(1, 0, 2, 3, 4).contiguous().view(-1, self.channel_dim, 64, 64)
-            # confidences.T has size keep_best x rollout length
-            all_confidences.append(confidences.T[-1][:-1])
-
+        pd = torch.max(rollout_data, from_numpy_to_var(masks))\
+            .permute(1, 0, 2, 3, 4).contiguous().view([-1, self.channel_dim] + list(start_img.shape[-2:]))
+        # confidences.T has size keep_best x rollout length
+        all_confidences.append(confidences.T[-1][:-1])
+        
+        if save:
             save_image(pd.data,
                        os.path.join(self.out_dir, 'plans', '%s_min_%s_%d_epoch_%d.png'
                                     % (self.planner.__name__, metric, i, epoch)),
                        nrow=int(pd.size()[0] / keep_best),
                        normalize=True)
-        all_confidences = np.stack(all_confidences)
-        print((all_confidences[:, 0] > 0.9).sum(), (all_confidences[:, -1] > 0.9).sum())
-        import pickle as pkl
-        with open(os.path.join(self.out_dir, 'all_confidences.pkl'), 'wb') as f:
-            pkl.dump(all_confidences, f)
-        import matplotlib.pyplot as plt
-        plt.boxplot([all_confidences.mean(1), all_confidences[all_confidences[:, -1] > 0.9].mean(1)])
-        plt.savefig(os.path.join(self.out_dir, 'boxplot.png'))
+            
+            self.save_img(start_obs, os.path.join(self.out_dir, 'plans/im0.png'))
+        
+        # After the loop
+        
+        # all_confidences = np.stack(all_confidences)
+        # print((all_confidences[:, 0] > 0.9).sum(), (all_confidences[:, -1] > 0.9).sum())
+        # import pickle as pkl
+        # with open(os.path.join(self.out_dir, 'all_confidences.pkl'), 'wb') as f:
+        #     pkl.dump(all_confidences, f)
+        # import matplotlib.pyplot as plt
+        # plt.boxplot([all_confidences.mean(1), all_confidences[all_confidences[:, -1] > 0.9].mean(1)])
+        # plt.savefig(os.path.join(self.out_dir, 'boxplot.png'))
+        return pd
 
-    def plan(self,
-             data_start_loader,
-             data_goal_loader,
-             epoch,
-             metric,
-             keep_best=10):
-        """
-        Generate visual plans from starts to goals.
-        First, find the closest codes for starts and goals.
-        Then, generate the plans in the latent space.
-        Finally, map the latent plans to visual plans and use the classifier to pick the top K.
-        The start image is loaded from data_start_loader. The goal image is loaded from data_goal_loader.
-        :param data_start_loader:
-        :param data_goal_loader:
-        :param epoch:
-        :param metric:
-        :param keep_best:
-        :return:
-        """
-        planning_dataloader = zip(data_start_loader, data_goal_loader)
-        for i, pair in enumerate(planning_dataloader, 0):
-            if self.fcn:
-                start_obs = self.apply_fcn_mse(pair[0][0])
-                goal_obs = self.apply_fcn_mse(pair[1][0])
+    def save_img(self, img, name):
+        import skimage
+        skimage.io.imsave(name, img.detach().cpu().numpy()[0].transpose((1, 2, 0)))
 
-            # Compute c_start and c_goal
-            pt_path = os.path.join(self.out_dir, 'plans', 'c_min_%s_%d_epoch_%d.pt' % (metric, i, epoch))
-            if os.path.exists(pt_path):
-                c_start, c_goal, est_start_obs, est_goal_obs = torch.load(pt_path)
-            else:
-                _, c_start, _, est_start_obs = self.closest_code(start_obs,
-                                                                 400,
-                                                                 False,
-                                                                 metric, 1)
-                _, _, c_goal, est_goal_obs = self.closest_code(goal_obs,
-                                                               400,
-                                                               True,
-                                                               metric, 1)
-                # _, c_start, _, est_start_obs = self.closest_code(start_obs,
-                #                                                  self.traj_eval_copies,
-                #                                                  False,
-                #                                                  metric, 0)
-                # _, _, c_goal, est_goal_obs = self.closest_code(goal_obs,
-                #                                                self.traj_eval_copies,
-                #                                                True,
-                #                                                metric, 0)
-                torch.save([c_start, c_goal, est_start_obs, est_goal_obs], pt_path)
+    def make_gif(self, plan, i, epoch):
+        from recursive_planning.infra.utils.create_gif_lib import npy_to_gif, npy_to_mp4
+        filename = self.out_dir + '/plans/gif_{}_{}'.format(i, epoch)
+    
+        x = plan.detach().cpu().numpy()
+        npy_to_gif(list(((x.transpose([0, 2, 3, 1]) + 1) * 127.5).astype(np.uint8)), filename, fps=4)
 
-            # Plan using c_start and c_goal.
-            rollout = self.planner(c_start.repeat(self.traj_eval_copies, 1),
-                                   c_goal.repeat(self.traj_eval_copies, 1),
-                                   start_obs=start_obs,
-                                   goal_obs=goal_obs)
-
-            # Insert closest start and goal.
-            rollout.insert(0, est_start_obs.repeat(self.traj_eval_copies, 1, 1, 1))
-            rollout.append(est_goal_obs.repeat(self.traj_eval_copies, 1, 1, 1))
-
-            # Insert real start and goal.
-            rollout.insert(0, start_obs.repeat(self.traj_eval_copies, 1, 1, 1))
-            rollout.append(goal_obs.repeat(self.traj_eval_copies, 1, 1, 1))
-
-            rollout_best_k, confidences = self.get_best_k(rollout, keep_best)
-            rollout_data = torch.stack(rollout_best_k, dim=0)
-
-            masks = - np.ones((rollout_data.size()[0], keep_best, self.channel_dim, 64, 64),
-                              dtype=np.float32)
-            write_number_on_images(masks, confidences)
-
-            # save_image(torch.max(rollout_data, from_numpy_to_var(masks)).view(-1, self.channel_dim, 64, 64).data,
-            #            os.path.join(self.out_dir, 'plans', '%s_min_%s_%d_epoch_%d.png'
-            #                         % (self.planner.__name__, metric, i, epoch)),
-            #            nrow=keep_best,
-            #            normalize=True)
-
-            pd = torch.max(rollout_data, from_numpy_to_var(masks)).permute(1, 0, 2, 3, 4).contiguous().view(-1, self.channel_dim, 64, 64)
-
-            save_image(pd.data,
-                       os.path.join(self.out_dir, 'plans', '%s_min_%s_%d_epoch_%d.png'
-                                    % (self.planner.__name__, metric, i, epoch)),
-                       nrow=int(pd.size()[0] / keep_best),
-                       normalize=True)
+    # def plan(self,
+    #          dataloader,
+    #          epoch,
+    #          metric,
+    #          keep_best=10):
+    #     """
+    #     Generate visual plans from starts to goals.
+    #     First, find the closest codes for starts and goals.
+    #     Then, generate the plans in the latent space.
+    #     Finally, map the latent plans to visual plans and use the classifier to pick the top K.
+    #     The start image is loaded from data_start_loader. The goal image is loaded from data_goal_loader.
+    #     :param data_start_loader:
+    #     :param data_goal_loader:
+    #     :param epoch:
+    #     :param metric:
+    #     :param keep_best:
+    #     :return:
+    #     """
+    #
+    #     for i, pair in enumerate(dataloader, 0):
+    #         if self.fcn:
+    #             start_obs = self.apply_fcn_mse(pair[0][0])
+    #             goal_obs = self.apply_fcn_mse(pair[1][0])
+    #
+    #         # Compute c_start and c_goal
+    #         pt_path = os.path.join(self.out_dir, 'plans', 'c_min_%s_%d_epoch_%d.pt' % (metric, i, epoch))
+    #         if os.path.exists(pt_path):
+    #             c_start, c_goal, est_start_obs, est_goal_obs = torch.load(pt_path)
+    #         else:
+    #             _, c_start, _, est_start_obs = self.closest_code(start_obs,
+    #                                                              400,
+    #                                                              False,
+    #                                                              metric, 1)
+    #             _, _, c_goal, est_goal_obs = self.closest_code(goal_obs,
+    #                                                            400,
+    #                                                            True,
+    #                                                            metric, 1)
+    #             # _, c_start, _, est_start_obs = self.closest_code(start_obs,
+    #             #                                                  self.traj_eval_copies,
+    #             #                                                  False,
+    #             #                                                  metric, 0)
+    #             # _, _, c_goal, est_goal_obs = self.closest_code(goal_obs,
+    #             #                                                self.traj_eval_copies,
+    #             #                                                True,
+    #             #                                                metric, 0)
+    #             torch.save([c_start, c_goal, est_start_obs, est_goal_obs], pt_path)
+    #
+    #         # Plan using c_start and c_goal.
+    #         rollout = self.planner(c_start.repeat(self.traj_eval_copies, 1),
+    #                                c_goal.repeat(self.traj_eval_copies, 1),
+    #                                start_obs=start_obs,
+    #                                goal_obs=goal_obs)
+    #
+    #         # Insert closest start and goal.
+    #         rollout.insert(0, est_start_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+    #         rollout.append(est_goal_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+    #
+    #         # Insert real start and goal.
+    #         rollout.insert(0, start_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+    #         rollout.append(goal_obs.repeat(self.traj_eval_copies, 1, 1, 1))
+    #
+    #         rollout_best_k, confidences = self.get_best_k(rollout, keep_best)
+    #         rollout_data = torch.stack(rollout_best_k, dim=0)
+    #
+    #         masks = - np.ones((rollout_data.size()[0], keep_best, self.channel_dim, 64, 64),
+    #                           dtype=np.float32)
+    #         write_number_on_images(masks, confidences)
+    #
+    #         # save_image(torch.max(rollout_data, from_numpy_to_var(masks)).view(-1, self.channel_dim, 64, 64).data,
+    #         #            os.path.join(self.out_dir, 'plans', '%s_min_%s_%d_epoch_%d.png'
+    #         #                         % (self.planner.__name__, metric, i, epoch)),
+    #         #            nrow=keep_best,
+    #         #            normalize=True)
+    #
+    #         pd = torch.max(rollout_data, from_numpy_to_var(masks)).permute(1, 0, 2, 3, 4).contiguous().view(-1, self.channel_dim, 64, 64)
+    #
+    #         save_image(pd.data,
+    #                    os.path.join(self.out_dir, 'plans', '%s_min_%s_%d_epoch_%d.png'
+    #                                 % (self.planner.__name__, metric, i, epoch)),
+    #                    nrow=int(pd.size()[0] / keep_best),
+    #                    normalize=True)
 
     def get_best_k(self, rollout, keep_best=10):
         """
@@ -624,7 +670,7 @@ class Trainer:
         :return: rollout list size n x (torch) keep_best x channel size x W x H,
                  confidence np size n-1 x keep_best
         """
-        confidences = [self.discriminator_function(rollout[i], rollout[i + 1]).reshape(-1) for i in
+        confidences = [self.D(rollout[i], rollout[i + 1]).reshape(-1).detach().cpu().numpy() for i in
                        range(len(rollout) - 1)]
         np_confidences = np.array(confidences)
         # take minimum confidence along trajectory
@@ -661,7 +707,7 @@ class Trainer:
             c_var = Variable(0.1 * torch.randn(n_trials, self.c_dim).cuda(), requires_grad=True)
             # c_var = Variable(self.Q.forward_soft(self.FE(obs.repeat(n_trials, 1, 1, 1))).data, requires_grad=True)
             optimizer = optim.Adam([c_var, z_var], lr=1e-2)
-            n_iters = 1000
+            n_iters = self.n_closest_iters
             for i in range(n_iters):
                 optimizer.zero_grad()
                 if self.planner == self.astar_plan:
@@ -713,7 +759,7 @@ class Trainer:
             print('\t %s measure: %.3f' % (metric, min_dist))
         return _z[min_idx].detach(), c[min_idx].detach(), c_next[min_idx].detach(), out[min_idx].detach()
 
-    def simple_plan(self, c_start, c_goal, verbose=True, **kwargs):
+    def simple_plan(self, c_start, c_goal, length, verbose=True, **kwargs):
         """
         Generate a plan in observation space given start and goal states via interpolation.
         :param c_start: bs x c_dim
@@ -723,9 +769,9 @@ class Trainer:
         with torch.no_grad():
             rollout = []
             _z = Variable(torch.randn(c_start.size()[0], self.rand_z_dim)).cuda()
-            for t in range(self.plan_length):
-                c = c_start + (c_goal - c_start) * t / self.plan_length
-                c_next = c_start + (c_goal - c_start) * (t + 1) / self.plan_length
+            for t in range(length):
+                c = c_start + (c_goal - c_start) * t / length
+                c_next = c_start + (c_goal - c_start) * (t + 1) / length
                 # _z = Variable(torch.randn(c.size()[0], self.rand_z_dim)).cuda()
 
                 _cur_img, _next_img = self.G(_z, c, c_next)
