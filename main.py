@@ -178,6 +178,7 @@ def make_trainer(args):
                                                            loadepoch))
                 except FileNotFoundError as e:
                     print("Couldn't load var %s" % i.__class__.__name__)
+                    raise ValueError()
                     pass
     
     # Training the variables

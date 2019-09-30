@@ -17,7 +17,7 @@ from collections import OrderedDict
 
 from vpa.planning import plan_traj_astar, discretize, undiscretize
 # from dataset import ImagePairs
-from vpa.gcp_datasets import h36m, maze, sawyer
+from vpa.gcp_datasets import h36m, maze, maze1000, sawyer
 from vpa.utils import plot_img, from_numpy_to_var, print_array, write_number_on_images, write_stats_from_var
 from vpa.logger import Logger
 
@@ -81,6 +81,8 @@ class Trainer:
             self.dataset = h36m.Dataset
         elif kwargs['dataset'] == 'maze':
             self.dataset = maze.Dataset
+        elif kwargs['dataset'] == 'maze1000':
+            self.dataset = maze1000.Dataset
         elif kwargs['dataset'] == 'sawyer':
             self.dataset = sawyer.Dataset
             
@@ -434,14 +436,31 @@ class Trainer:
             
             evaluator = EvalPSNR(2)
             
+            
+            plans = []
+            datas = []
+            
             for i, data in enumerate(data_plan_loader):
-                plan = self.plan_hack(i, data[:, 0], data[:, -1], epoch, 'L2', data.shape[1] - 3)
+                plan = self.plan_hack(i, data[:, 0], data[:, -1], epoch, 'L2', data.shape[1] - 3, save=False)
                 evaluator(plan[None].cpu().numpy(), data.cpu().numpy())
                 print(evaluator.PSNR(), evaluator.SSIM())
 
-                self.make_gif(torch.cat([data[0], plan.cpu()], dim=2), i, epoch)
+                # if i < 4:
+                #     self.make_gif(torch.cat([data[0], plan.cpu()], dim=2), i, epoch)
 
-
+                plans.append(plan.cpu())
+                datas.append(data[0])
+                if i == 3:
+                    for i in range(4): datas[i] = np.concatenate(
+                        [datas[i], np.zeros([100 - datas[i].shape[0]] + list(datas[i].shape[1:]))], 0)
+                    for i in range(4): plans[i] = np.concatenate([plans[i], torch.zeros([100 - plans[i].shape[0]] + list(plans[i].shape[1:]))], 0)
+                    data = np.concatenate(datas, 3)
+                    plan = np.concatenate(plans, 3)
+                    
+                    self.make_gif(torch.from_numpy(np.concatenate([data, plan], 2)), i, epoch, fps=4)
+                
+                    import pdb; pdb.set_trace()
+                    
             print(('Test: [{0}/{1}]\t'
                    'PSNR {PSNR:.3f}'
                    'SSIM {SSIM:.3f}'.format(
@@ -573,12 +592,12 @@ class Trainer:
         import skimage
         skimage.io.imsave(name, img.detach().cpu().numpy()[0].transpose((1, 2, 0)))
 
-    def make_gif(self, plan, i, epoch):
+    def make_gif(self, plan, i, epoch, fps):
         from recursive_planning.infra.utils.create_gif_lib import npy_to_gif, npy_to_mp4
         filename = self.out_dir + '/plans/gif_{}_{}'.format(i, epoch)
     
         x = plan.detach().cpu().numpy()
-        npy_to_gif(list(((x.transpose([0, 2, 3, 1]) + 1) * 127.5).astype(np.uint8)), filename, fps=4)
+        npy_to_gif(list(((x.transpose([0, 2, 3, 1]) + 1) * 127.5).astype(np.uint8)), filename, fps=fps)
 
     # def plan(self,
     #          dataloader,

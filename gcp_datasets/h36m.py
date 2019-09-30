@@ -43,7 +43,7 @@ class Dataset(FolderSplitVarLenVideoDataset):
     
     def __init__(self, phase, mode):
         self.mode = mode
-        super().__init__(os.environ['RECPLAN_DATA_DIR'] + '/h36m_long_linked',
+        super().__init__(os.environ['RECPLAN_DATA_DIR'] + '/h36m_long',
                          config, config, phase=phase, dataset_size=GCPDataset.dataset_size(phase))
     
     def __getitem__(self, item):
