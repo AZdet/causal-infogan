@@ -16,15 +16,15 @@ parser.add_argument("-prefix",
                     help="experiment prefix")
 parser.add_argument("-fcnpath",
                     type=str,
-                    default='/home/thanard/Downloads/FCN_mse',
+                    default='/NAS/home/causal-infogan/FCN_mse',
                     help="path to fcn parameters for background subtraction")
 parser.add_argument("-data_dir",
                     type=str,
-                    default='/home/thanard/Downloads/rope_full',
+                    default='/NAS/home/causal-infogan/rope_full',
                     help='path to rope_full data')
 parser.add_argument("-planning_data_dir",
                     type=str,
-                    default='/home/thanard/Downloads/seq_data_2',
+                    default='/NAS/home/causal-infogan/seq_data_2',
                     help='path to seq_data_2 data')
 parser.add_argument("-loadpath",
                     type=str,

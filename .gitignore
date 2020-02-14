@@ -1,0 +1,10 @@
+rope_full/*
+seq_data_2/*
+__pycache__/*
+out/*
+.vscode/*
+FCN_mse
+*.pyc
+*.tar.gz
+*.pkl
+*.png
