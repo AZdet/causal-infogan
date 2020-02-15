@@ -2,9 +2,11 @@ import sys
 import argparse
 from model import *
 from trainer import Trainer
+import tensorflow as tf
+import os
 
 parser = argparse.ArgumentParser()
-
+tf.enable_eager_execution(config=tf.ConfigProto(device_count={'GPU': 0}))
 # Path configurations
 parser.add_argument("-savepath",
                     type=str,
@@ -16,7 +18,7 @@ parser.add_argument("-prefix",
                     help="experiment prefix")
 parser.add_argument("-fcnpath",
                     type=str,
-                    default='/NAS/home/causal-infogan/FCN_mse',
+                    default=None, #'/NAS/home/causal-infogan/FCN_mse',
                     help="path to fcn parameters for background subtraction")
 parser.add_argument("-data_dir",
                     type=str,

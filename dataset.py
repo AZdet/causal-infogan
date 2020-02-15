@@ -5,6 +5,16 @@ import os
 import os.path
 import gzip
 import errno
+import tensorflow as tf
+import torch
+import os
+import glob
+import sys
+from utils import AttrDict
+#from specs import machine_dependent_specs as m_specs
+import numpy as np
+import re
+
 
 from torchvision.datasets.folder import is_image_file, default_loader, find_classes, \
     IMG_EXTENSIONS
@@ -210,3 +220,120 @@ class ImagePairs(data.Dataset):
         tmp = '    Target Transforms (if any): '
         fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
         return fmt_str
+
+
+class KeyInSets():
+    
+    def __init__(self):
+        #super().__init__()
+        #tf.enable_eager_execution()
+        data_dir = '/NAS/scratch/robotic_video/KeyIn/TOP_gtimestep' + "/train"
+        #import pdb; pdb.set_trace()
+        tfrecord_files = sorted(glob.glob(data_dir + '/*.tfrecord'))
+        self.raw_dataset = tf.data.TFRecordDataset(tfrecord_files)
+        self.dataset_config = AttrDict(input_width=64, input_height=64,
+                            channels=3, num_actions=4, max_seq_length=40, im_width=64, im_heigh=64, num_abs_actions=1)
+        self.data_iter = iter(self.raw_dataset)
+        
+    def get_batch_data(self, batch_size=64):
+        #import pdb; pdb.set_trace()
+        try:
+            while True:
+                batch_o = []
+                batch_o_next = []
+                data_iter = self.get_data()
+                for i in range(batch_size):
+                    o, o_next = next(data_iter)
+                    batch_o.append(o)
+                    batch_o_next.append(o_next)
+                tensor_o = torch.cat(batch_o).view(batch_size, -1, batch_o[0].shape[1], batch_o[0].shape[2])
+                tensor_o_next = torch.cat(batch_o).view(batch_size, -1, batch_o[0].shape[1], batch_o[0].shape[2])
+                yield [(tensor_o, None), (tensor_o_next, None)]
+        except StopIteration: # this happens because next(data_iter) is exhausted
+            self.data_iter = iter(self.raw_dataset)
+
+        
+
+    def get_data(self, seed=None):
+        # try:
+        #     while True:
+        for rec in self.data_iter:
+            # rec = next(self.data_iter)
+            # example = tf.train.Example()
+            # example.ParseFromString(rec.numpy())
+            # keys = sorted(example.features.feature.keys())
+            # imgs, max_valid_idx
+            results = self.parse_top(rec, self.dataset_config)
+            # randomly take out consecutive images as data 
+            take_idx = np.random.randint(low=0, high=min(results[1].numpy(),results[2])-1)
+            imgs = torch.from_numpy(results[0].numpy().transpose(0, 3, 1, 2)) / 255 # float type, put range to (0, 1)
+            yield imgs[take_idx], imgs[take_idx+1]
+        # except StopIteration:
+        #     self.data_iter = iter(self.raw_dataset)
+
+
+
+
+    def _parse_bairlike_generic(self, example_proto, dataset_config,
+                              feature_templates_and_shapes):
+        """Parses the BAIR dataset, fuses individual frames to tensors."""
+        features = {}  # fill all features in feature dict
+        for key, feat_params in feature_templates_and_shapes.items():
+            for frame in range(dataset_config.max_seq_length):
+                if feat_params["type"] == tf.string:
+                    feat = tf.VarLenFeature(dtype=tf.string)
+                else:
+                    feat = tf.FixedLenFeature(dtype=feat_params["type"],
+                                            shape=feat_params["shape"])
+                features.update({feat_params["name"].format(frame): feat})
+        parsed_features = tf.parse_single_example(example_proto, features)
+
+        # decode frames and stack in video
+
+        def process_feature(feat_params, frame):
+            feat_tensor = parsed_features[feat_params["name"].format(frame)]
+            if feat_params["type"] == tf.string:
+                feat_tensor = tf.sparse_tensor_to_dense(feat_tensor, default_value="")
+                # feat_tensor = tf.decode_raw(feat_tensor, tf.float32)
+                feat_tensor = tf.cast(tf.decode_raw(feat_tensor, tf.uint8), tf.float32)
+                feat_tensor = tf.reshape(feat_tensor, feat_params["shape"])
+            return feat_tensor
+
+        parsed_seqs = {}
+        for key, feat_params in feature_templates_and_shapes.items():
+            if "dim" in feat_params and feat_params["dim"] == 0:
+                feat_tensor = process_feature(feat_params, 0)
+                parsed_seqs.update({key: feat_tensor})
+            else:
+                frames = []
+                for frame in range(dataset_config.max_seq_length):
+                    feat_tensor = process_feature(feat_params, frame)
+                    frames.append(feat_tensor)
+                parsed_seqs.update({key: tf.stack(frames)})
+
+        return parsed_seqs
+
+    def parse_top(self, example_proto, dataset_config):
+        # specify feature templates that frame numbers will be filled into
+        img_shape = (dataset_config.input_height, dataset_config.input_width, dataset_config.channels,)
+        feature_templates_and_shapes = {
+            "goal_timestep": {"name": "goal_timestep", "shape": (1,), "type": tf.int64, "dim": 0},
+            "images": {"name": "{}/image_view0/encoded", "shape": img_shape, "type": tf.string, "dim": 1},
+            "actions": {"name": "{}/action", "shape": (dataset_config.num_actions,), "type": tf.float32, "dim": 1},
+            "abs_actions": {"name": "{}/is_key_frame", "shape": (1,), "type": tf.int64, "dim": 1},
+            "is_key_frame": {"name": "{}/is_key_frame", "shape": (1,), "type": tf.int64, "dim": 1}
+        }
+
+        parsed_seqs = self._parse_bairlike_generic(example_proto, dataset_config,
+                                                                feature_templates_and_shapes)
+        data_tensors = AttrDict(goal_timestep=parsed_seqs["goal_timestep"])
+        parsed_seqs["actions"] = parsed_seqs["actions"] / 2  # rescale actions
+        return parsed_seqs['images'], parsed_seqs["goal_timestep"],dataset_config.max_seq_length
+        #return parsed_seqs["images"], parsed_seqs["actions"], \
+                #parsed_seqs["abs_actions"], data_tensors, dataset_config.max_seq_length
+
+
+
+if __name__ == "__main__":
+    d = KeyInSets()
+

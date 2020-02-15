@@ -15,11 +15,11 @@ from tensorboard_logger import configure, log_value
 from collections import OrderedDict
 
 from planning import plan_traj_astar, discretize, undiscretize
-from dataset import ImagePairs
+from dataset import ImagePairs, KeyInSets
 from utils import plot_img, from_numpy_to_var, print_array, write_number_on_images, write_stats_from_var
 from model import get_causal_classifier
 from logger import Logger
-
+from tqdm import tqdm
 
 class Trainer:
     def __init__(self, G, D, Q, T, P, **kwargs):
@@ -177,16 +177,22 @@ class Trainer:
                 # Apply grayscale transformation.
                 trans.append(lambda x: x.mean(dim=0)[None, :, :])
 
+        #import pdb; pdb.set_trace()
+
         trans_comp = transforms.Compose(trans)
         # Image 1 and image 2 are k steps apart.
-        dataset = ImagePairs(root=rope_path,
-                             transform=trans_comp,
-                             n_frames_apart=self.k)
-        dataloader = torch.utils.data.DataLoader(dataset,
-                                                 batch_size=self.batch_size,
-                                                 shuffle=True,
-                                                 num_workers=2,
-                                                 drop_last=True)
+        # dataset = ImagePairs(root=rope_path,
+        #                      transform=trans_comp,
+        #                      n_frames_apart=self.k)
+
+        # now we don't use ImagePairs, we load data direcly
+        dataset = KeyInSets()
+        # dataloader = dataset.get_batch_data(batch_size=2)
+        # dataloader = torch.utils.data.DataLoader(dataset,
+        #                                          batch_size=self.batch_size,
+        #                                          shuffle=True,
+        #                                          num_workers=2,
+        #                                          drop_last=True)
         ############################################
         # Load eval plan dataset
         planning_data_dir = self.planning_data_dir
@@ -205,11 +211,14 @@ class Trainer:
                                                        num_workers=1,
                                                        drop_last=True)
         ############################################
-        for epoch in range(self.n_epochs + 1):
+        #import pdb; pdb.set_trace()
+        for epoch in tqdm(range(self.n_epochs + 1)):
             self.G.train()
             self.D.train()
             self.Q.train()
             self.T.train()
+        
+            dataloader = dataset.get_batch_data(batch_size=self.batch_size) 
             for num_iters, batch_data in enumerate(dataloader, 0):
                 # Real data
                 o, _ = batch_data[0]
@@ -351,6 +360,7 @@ class Trainer:
             # Save images
             # Plot fake data
             x_save, x_next_save = self.G(*self.eval_input, self.get_c_next(epoch))
+            #import pdb; pdb.set_trace()
             save_image(x_save.data,
                        os.path.join(self.out_dir, 'gen', 'curr_samples_%03d.png' % epoch),
                        nrow=self.test_num_codes,
@@ -405,23 +415,23 @@ class Trainer:
                     writer.writerow(["%.3f" % _tmp for _tmp in [epoch] + list(self.log_dict.values())])
             #############################################
             # Do planning?
-            if self.plan_length <= 0 or epoch not in self.planning_epoch:
-                continue
-            print("\n#######################"
-                  "\nPlanning")
+            # if self.plan_length <= 0 or epoch not in self.planning_epoch:
+            #     continue
+            # print("\n#######################"
+            #       "\nPlanning")
             #############################################
             # Showing plans on real images using best code.
             # Min l2 distance from start and goal real images.
-            self.plan_hack(data_start_loader,
-                           data_goal_loader,
-                           epoch,
-                           'L2')
+            # self.plan_hack(data_start_loader,
+            #                data_goal_loader,
+            #                epoch,
+            #                'L2')
 
             # Min classifier distance from start and goal real images.
-            self.plan_hack(data_start_loader,
-                           data_goal_loader,
-                           epoch,
-                           'classifier')
+            # self.plan_hack(data_start_loader,
+            #                data_goal_loader,
+            #                epoch,
+            #                'classifier')
     #############################################
     # Visual Planning
     def plan_hack(self,

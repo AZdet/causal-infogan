@@ -95,3 +95,10 @@ def plot_img(img, path, vrange=None, title=None):
     plt.imshow(img, vmin=vrange[0], vmax=vrange[1], cmap='gray', aspect='auto')
     plt.savefig(path)
     plt.close()
+
+
+
+# copy over from KeyIN
+class AttrDict(dict):
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
