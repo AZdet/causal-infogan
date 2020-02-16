@@ -54,6 +54,7 @@ class Trainer:
         self.planning_epoch = kwargs['planning_epoch']
         self.plan_length = kwargs['plan_length']
         self.discretization_bins = 20
+        self.n_closest_iters = 1000
 
         # Make directories
         self.data_dir = kwargs['data_dir']
@@ -213,15 +214,16 @@ class Trainer:
         ############################################
         #import pdb; pdb.set_trace()
         for epoch in tqdm(range(self.n_epochs + 1)):
+            #import pdb; pdb.set_trace()
             self.G.train()
             self.D.train()
             self.Q.train()
             self.T.train()
-            # model_path = './out/color/var/'
-            # self.G.load_state_dict(torch.load(model_path + 'G_10'))
-            # self.D.load_state_dict(torch.load(model_path + 'D_10'))
-            # self.Q.load_state_dict(torch.load(model_path + 'GaussianPosterior_10'))
-            # self.T.load_state_dict(torch.load(model_path + 'GaussianTransition_10'))
+            model_path = './out/color/var/'
+            self.G.load_state_dict(torch.load(model_path + 'G_10'))
+            self.D.load_state_dict(torch.load(model_path + 'D_10'))
+            self.Q.load_state_dict(torch.load(model_path + 'GaussianPosterior_10'))
+            self.T.load_state_dict(torch.load(model_path + 'GaussianTransition_10'))
             dataloader = dataset.get_batch_data(batch_size=self.batch_size) 
             for num_iters, batch_data in enumerate(dataloader, 0):
                 # Real data
@@ -420,6 +422,7 @@ class Trainer:
             #############################################
             # Do planning?
             import pdb; pdb.set_trace()
+            self.planning_epoch = list(range(100))
             if self.plan_length <= 0 or epoch not in self.planning_epoch:
                 continue
             print("\n#######################"
@@ -432,8 +435,9 @@ class Trainer:
             data_plan_loader = dataset.get_plan_data()
             for i, plan_data in enumerate(data_plan_loader):
                 data, goal_time_step = plan_data
+                data = data[None, ...]
                 # use goal_timestep, 
-                plan = self.plan_hack(i, data[0], data[goal_time_step], epoch, 'L2', goal_time_step + 1, save=False)
+                plan = self.plan_hack(i, data[:, 0], data[:, goal_time_step], epoch, 'L2', goal_time_step + 1, save=False)
 
                 plans.append(plan.cpu())
                 datas.append(data[0])
@@ -497,7 +501,6 @@ class Trainer:
             if save: torch.save([z_start, c_start, _, est_start_obs], pt_start)
         # Hacky for now
         try:
-            import pdb; pdb.set_trace()
             c_start = Variable(c_start)
             est_start_obs = Variable(est_start_obs)
         except RuntimeError:
@@ -544,7 +547,7 @@ class Trainer:
         pd = torch.max(rollout_data, from_numpy_to_var(masks))\
             .permute(1, 0, 2, 3, 4).contiguous().view([-1, self.channel_dim] + list(start_img.shape[-2:]))
         # confidences.T has size keep_best x rollout length
-        #all_confidences.append(confidences.T[-1][:-1])
+        all_confidences.append(confidences.T[-1][:-1])
         
         if save:
             save_image(pd.data,
@@ -670,7 +673,8 @@ class Trainer:
         :return: rollout list size n x (torch) keep_best x channel size x W x H,
                  confidence np size n-1 x keep_best
         """
-        confidences = [self.discriminator_function(rollout[i], rollout[i + 1]).reshape(-1) for i in range(len(rollout) - 1)]
+        confidences = [self.D(rollout[i], rollout[i + 1]).reshape(-1).detach().cpu().numpy() for i in
+                       range(len(rollout) - 1)]
         np_confidences = np.array(confidences)
         # take minimum confidence along trajectory
         min_confidences = np.mean(np_confidences, axis=0)
@@ -706,7 +710,7 @@ class Trainer:
             c_var = Variable(0.1 * torch.randn(n_trials, self.c_dim).cuda(), requires_grad=True)
             # c_var = Variable(self.Q.forward_soft(self.FE(obs.repeat(n_trials, 1, 1, 1))).data, requires_grad=True)
             optimizer = optim.Adam([c_var, z_var], lr=1e-2)
-            n_iters = 1000
+            n_iters = self.n_closest_iters
             for i in range(n_iters):
                 optimizer.zero_grad()
                 if self.planner == self.astar_plan:
