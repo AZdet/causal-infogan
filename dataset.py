@@ -252,7 +252,17 @@ class KeyInSets():
         except StopIteration: # this happens because next(data_iter) is exhausted
             self.data_iter = iter(self.raw_dataset)
 
-        
+    def get_plan_data(self):
+        try:
+            while True:
+                for rec in self.data_iter:
+                    results = self.parse_top(rec, self.dataset_config)
+                    imgs = torch.from_numpy(results[0].numpy().transpose(0, 3, 1, 2)) / 255 # float type, put range to (0, 1)
+                    goal_timestep = results[1].numpy()
+                    yield imgs, goal_timestep
+        except StopIteration:
+            self.data_iter = iter(self.raw_dataset)
+
 
     def get_data(self, seed=None):
         # try:
