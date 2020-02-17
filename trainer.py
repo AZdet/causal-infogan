@@ -455,6 +455,7 @@ class Trainer:
                     plan = np.concatenate(plans, 3)
                     
                     self.make_gif(torch.from_numpy(np.concatenate([data, plan], 2)), j, epoch, fps=4)
+                break
 
             # Min classifier distance from start and goal real images.
             # self.plan_hack(data_start_loader,
