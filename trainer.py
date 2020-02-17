@@ -213,17 +213,22 @@ class Trainer:
                                                        drop_last=True)
         ############################################
         #import pdb; pdb.set_trace()
+        self.G.train()
+        self.D.train()
+        self.Q.train()
+        self.T.train()
+        model_path = './out/color/var/'
+        self.G.load_state_dict(torch.load(model_path + 'G_10'))
+        self.D.load_state_dict(torch.load(model_path + 'D_10'))
+        self.Q.load_state_dict(torch.load(model_path + 'GaussianPosterior_10'))
+        self.T.load_state_dict(torch.load(model_path + 'GaussianTransition_10'))
         for epoch in tqdm(range(self.n_epochs + 1)):
             #import pdb; pdb.set_trace()
             self.G.train()
             self.D.train()
             self.Q.train()
             self.T.train()
-            model_path = './out/color/var/'
-            self.G.load_state_dict(torch.load(model_path + 'G_10'))
-            self.D.load_state_dict(torch.load(model_path + 'D_10'))
-            self.Q.load_state_dict(torch.load(model_path + 'GaussianPosterior_10'))
-            self.T.load_state_dict(torch.load(model_path + 'GaussianTransition_10'))
+            
             dataloader = dataset.get_batch_data(batch_size=self.batch_size) 
             for num_iters, batch_data in enumerate(dataloader, 0):
                 # Real data
@@ -394,11 +399,11 @@ class Trainer:
             if epoch % 5 == 0:
                 if not os.path.exists('%s/var' % self.out_dir):
                     os.makedirs('%s/var' % self.out_dir)
-                for i in [self.G, self.D, self.Q, self.T]:
-                    torch.save(i.state_dict(),
+                for j in [self.G, self.D, self.Q, self.T]:
+                    torch.save(j.state_dict(),
                                os.path.join(self.out_dir,
                                             'var',
-                                            '%s_%d' % (i.__class__.__name__, epoch,
+                                            '%s_%d' % (j.__class__.__name__, epoch,
                                                        )))
             #############################################
             # Logging (epoch)
@@ -421,7 +426,7 @@ class Trainer:
                     writer.writerow(["%.3f" % _tmp for _tmp in [epoch] + list(self.log_dict.values())])
             #############################################
             # Do planning?
-            import pdb; pdb.set_trace()
+            #import pdb; pdb.set_trace()
             self.planning_epoch = list(range(100))
             if self.plan_length <= 0 or epoch not in self.planning_epoch:
                 continue
@@ -433,22 +438,23 @@ class Trainer:
             plans = []
             datas = []
             data_plan_loader = dataset.get_plan_data()
-            for i, plan_data in enumerate(data_plan_loader):
+            for j, plan_data in enumerate(data_plan_loader):
                 data, goal_time_step = plan_data
                 data = data[None, ...]
                 # use goal_timestep, 
-                plan = self.plan_hack(i, data[:, 0], data[:, goal_time_step], epoch, 'L2', goal_time_step + 1, save=False)
+                #import pdb; pdb.set_trace()
+                plan = self.plan_hack(j, data[:, 0], data[:, goal_time_step-1], epoch, 'L2', 40, save=True)
 
                 plans.append(plan.cpu())
                 datas.append(data[0])
-                if i == 3:
-                    for i in range(4): datas[i] = np.concatenate(
+                if j == 0:
+                    for i in range(j+1): datas[i] = np.concatenate(
                         [datas[i], np.zeros([100 - datas[i].shape[0]] + list(datas[i].shape[1:]))], 0)
-                    for i in range(4): plans[i] = np.concatenate([plans[i], torch.zeros([100 - plans[i].shape[0]] + list(plans[i].shape[1:]))], 0)
+                    for i in range(j+1): plans[i] = np.concatenate([plans[i], torch.zeros([100 - plans[i].shape[0]] + list(plans[i].shape[1:]))], 0)
                     data = np.concatenate(datas, 3)
                     plan = np.concatenate(plans, 3)
                     
-                    self.make_gif(torch.from_numpy(np.concatenate([data, plan], 2)), i, epoch, fps=4)
+                    self.make_gif(torch.from_numpy(np.concatenate([data, plan], 2)), j, epoch, fps=4)
 
             # Min classifier distance from start and goal real images.
             # self.plan_hack(data_start_loader,
@@ -467,7 +473,7 @@ class Trainer:
                   epoch,
                   metric,
                   length,
-                  save=False,  # TODO implement
+                  save=True,  # TODO implement
                   keep_best=1):
         """
         Generate visual plans from starts to goals.

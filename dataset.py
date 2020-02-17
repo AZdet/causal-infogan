@@ -258,7 +258,7 @@ class KeyInSets():
                 for rec in self.data_iter:
                     results = self.parse_top(rec, self.dataset_config)
                     imgs = torch.from_numpy(results[0].numpy().transpose(0, 3, 1, 2)) / 255 # float type, put range to (0, 1)
-                    goal_timestep = results[1].numpy()
+                    goal_timestep = results[1].numpy()[0]
                     yield imgs, goal_timestep
         except StopIteration:
             self.data_iter = iter(self.raw_dataset)
