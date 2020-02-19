@@ -2,11 +2,11 @@ import sys
 import argparse
 from model import *
 from trainer import Trainer
-import tensorflow as tf
+# import tensorflow as tf
 import os
 
 parser = argparse.ArgumentParser()
-tf.enable_eager_execution(config=tf.ConfigProto(device_count={'GPU': 0}))
+# tf.enable_eager_execution(config=tf.ConfigProto(device_count={'GPU': 0}))
 # Path configurations
 parser.add_argument("-savepath",
                     type=str,
