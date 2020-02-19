@@ -20,6 +20,7 @@ from utils import plot_img, from_numpy_to_var, print_array, write_number_on_imag
 from model import get_causal_classifier
 from logger import Logger
 from tqdm import tqdm
+from eval import EvalPSNR
 
 class Trainer:
     def __init__(self, G, D, Q, T, P, **kwargs):
@@ -230,7 +231,7 @@ class Trainer:
             self.T.train()
             
             dataloader = dataset.get_batch_data(batch_size=self.batch_size) 
-            for num_iters, batch_data in enumerate(dataloader, 0):
+            '''for num_iters, batch_data in enumerate(dataloader, 0):
                 # Real data
                 o, _ = batch_data[0]
                 o_next, _ = batch_data[1]
@@ -361,6 +362,7 @@ class Trainer:
                              t_diff.data.abs().mean(),
                              t_variance.data.sqrt().mean(),
                              ))
+            '''
             #############################################
             # Start evaluation from here.
             self.G.eval()
@@ -437,25 +439,37 @@ class Trainer:
             # Min l2 distance from start and goal real images.
             plans = []
             datas = []
+            evaluator = EvalPSNR(2)
             data_plan_loader = dataset.get_plan_data()
+            eval_stat = []
             for j, plan_data in enumerate(data_plan_loader):
                 data, goal_time_step = plan_data
                 data = data[None, ...]
                 # use goal_timestep, 
-                #import pdb; pdb.set_trace()
-                plan = self.plan_hack(j, data[:, 0], data[:, goal_time_step-1], epoch, 'L2', 40, save=True)
-
-                plans.append(plan.cpu())
-                datas.append(data[0])
-                if j == 0:
-                    for i in range(j+1): datas[i] = np.concatenate(
+                plan = self.plan_hack(j, data[:, 0], data[:, goal_time_step-1], epoch, 'L2',goal_time_step, save=True)
+                
+                length = data.shape[1]
+                clipped_plan = torch.max(plan[:length][None], torch.zeros_like(plan[:length][None]))
+                evaluator(clipped_plan.cpu().numpy() * 2 - 1, data.cpu().numpy() * 2 -1)
+                print(evaluator.PSNR(), evaluator.SSIM())
+                eval_stat.append([evaluator.PSNR(), evaluator.SSIM()])
+                if j % 5 == 0:
+                    plans.append(plan.cpu())
+                    datas.append(data[0])
+                    for i in range(1): datas[i] = np.concatenate(
                         [datas[i], np.zeros([100 - datas[i].shape[0]] + list(datas[i].shape[1:]))], 0)
-                    for i in range(j+1): plans[i] = np.concatenate([plans[i], torch.zeros([100 - plans[i].shape[0]] + list(plans[i].shape[1:]))], 0)
+                    for i in range(1): plans[i] = np.concatenate([plans[i], torch.zeros([100 - plans[i].shape[0]] + list(plans[i].shape[1:]))], 0)
                     data = np.concatenate(datas, 3)
                     plan = np.concatenate(plans, 3)
-                    
+                    np.save(os.path.join(self.out_dir,'data-'+str(j)), data)
+                    np.save(os.path.join(self.out_dir,'plan-'+str(j)), plan)
                     self.make_gif(torch.from_numpy(np.concatenate([data, plan], 2)), j, epoch, fps=4)
-                break
+                    plans = []
+                    datas = []
+                    np.save(os.path.join(self.out_dir,'eval_stat'+'-epoch-'+str(epoch)), np.array(eval_stat))
+                if j > 100:
+                    break
+            np.save(os.path.join(self.out_dir,'eval_stat'+'-epoch-'+str(epoch)), np.array(eval_stat))
 
             # Min classifier distance from start and goal real images.
             # self.plan_hack(data_start_loader,
